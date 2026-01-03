@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "speaker-feedback-nemo"
+version = "0.1.0"
+description = "NeMo Agent Toolkit integration for speaker feedback recommendations."
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["speaker_feedback_nemo*"]
+
+[project.entry-points."nat.functions"]
+speaker_feedback_nemo = "speaker_feedback_nemo.register"
+
+[project.entry-points."nat.function"]
+speaker_feedback_nemo = "speaker_feedback_nemo.register"
+
+[project.entry-points."nat.tools"]
+speaker_feedback_nemo = "speaker_feedback_nemo.register"
+
+[project.entry-points."nat.plugin"]
+speaker_feedback_nemo = "speaker_feedback_nemo.register"
+
+[project.entry-points."nat.plugins"]
+speaker_feedback_nemo = "speaker_feedback_nemo.register"
+
+[project.entry-points."nat.register"]
+speaker_feedback_nemo = "speaker_feedback_nemo.register"
+
+[project.entry-points."nat.function_registry"]
+speaker_feedback_nemo = "speaker_feedback_nemo.register"

@@ -1,0 +1,48 @@
+llms:
+  speaker_llm:
+    _type: nim
+    model_name: meta/llama-3.1-70b-instruct
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key: $NVIDIA_API_KEY
+    temperature: 0.2
+    top_p: 0.95
+    max_tokens: 2048
+
+functions:
+  load_payload:
+    _type: speaker_feedback_nemo/load_payload
+  get_slide_context:
+    _type: speaker_feedback_nemo/get_slide_context
+
+workflow:
+  _type: react_agent
+  tool_names:
+    - load_payload
+    - get_slide_context
+  llm_name: speaker_llm
+  system_prompt: |
+    You are a presentation coaching agent. Use tools to load the analysis payload and
+    provide concise, actionable feedback.
+
+    You have access to these tools:
+    {tools}
+
+    Tool names:
+    {tool_names}
+
+    Output rules:
+    - Always respond with JSON only (no markdown, no extra text).
+    - The JSON must match this shape:
+      {{
+        "overall": ["..."],
+        "per_slide": {{
+          "1": {{"strengths": ["..."], "improvements": ["..."]}},
+          "2": {{"strengths": ["..."], "improvements": ["..."]}}
+        }}
+      }}
+    - If you need slide-level details, call get_slide_context.
+    - If you need the trimmed overall payload, call load_payload.
+  verbose: true
+  max_iterations: 6
+  parse_agent_response_max_retries: 2
+  max_tool_calls: 20
