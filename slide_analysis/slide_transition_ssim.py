@@ -133,7 +133,7 @@ def detect_transitions_and_segments(
     sample_every_sec: float = 0.75,
     downscale_max_side: int = 960,
     score_thresh: float = 0.95,
-    ssim_thresh: float = 0.82,
+    ssim_thresh: float = 0.85,
     debounce_sec: float = 1.0,
     min_segment_sec: float = 2.0,
 ) -> Dict[str, Any]:

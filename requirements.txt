@@ -1,0 +1,43 @@
+﻿# ---- Core (ABI-sensitive) ----
+numpy<2
+protobuf<4
+requests
+scipy
+pillow
+
+# ---- CV (compiled wheels → pin) ----
+opencv-contrib-python==4.11.0.86
+mediapipe==0.10.9
+
+# ---- CV / ML apps ----
+ultralytics
+facenet-pytorch
+
+# ---- Audio / Video ----
+moviepy
+librosa
+whisper-timestamped
+noisereduce
+pystoi
+emotiefflib
+imageio-ffmpeg
+nltk
+gdown
+
+# ---- Hugging Face stack ----
+transformers
+huggingface_hub
+tokenizers
+safetensors
+accelerate
+
+# ---- NVIDIA ----
+nvidia-nat[langchain]
+
+# ---- PyTorch CUDA 12.1 (MUST pin) ----
+torch==2.5.1+cu121
+torchvision==0.20.1+cu121
+torchaudio==2.5.1+cu121
+
+# ---- Detectron2 ----
+detectron2 @ git+https://github.com/facebookresearch/detectron2.git

@@ -3,11 +3,11 @@ from __future__ import annotations
 import gc
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+from collections import defaultdict, Counter
 
 import cv2
 import numpy as np
 import torch
-from collections import defaultdict, Counter
 
 
 def _force_cleanup():
@@ -23,17 +23,20 @@ class EmotionConfig:
     min_face_conf: float = 0.55
 
     # face crop settings
-    expand_scale: float = 1.25     # expand bbox a bit for robustness
-    min_face_size: int = 48        # skip very small crops
+    expand_scale: float = 1.25
+    min_face_size: int = 48
 
     # batching
     batch_size: int = 32
 
     # slide aggregation
-    min_valid_frames_for_slide: int = 1  # if no valid frames -> "no_face"
+    min_valid_frames_for_slide: int = 1
 
     # stability / cleanup
-    max_total_frames: int = 400     # global cap to avoid runaway compute
+    max_total_frames: int = 400
+
+    # evidence
+    top_frames_per_slide: int = 3  # keep a few best frames for citations
 
 
 def _clamp_box(x1, y1, x2, y2, w, h):
@@ -62,6 +65,17 @@ def expand_bbox(bbox: List[int], frame_w: int, frame_h: int, scale: float) -> Li
     return [nx1, ny1, nx2, ny2]
 
 
+def _softmax(x: np.ndarray) -> np.ndarray:
+    x = x - np.max(x, axis=-1, keepdims=True)
+    e = np.exp(x)
+    return e / np.sum(e, axis=-1, keepdims=True)
+
+
+def _entropy(p: np.ndarray, eps: float = 1e-12) -> float:
+    p = np.clip(p, eps, 1.0)
+    return float(-np.sum(p * np.log(p)))
+
+
 def pick_best_frames_per_slide(
     slide_frame_mapping: Dict[int, Dict[str, Any]],
     face_crops_cache: Dict[int, List[Dict[str, Any]]],
@@ -69,6 +83,7 @@ def pick_best_frames_per_slide(
 ) -> List[Dict[str, Any]]:
     """
     Returns list of {slide_id, frame_idx, face_conf, bbox} chosen top-N per slide.
+    Prefers largest face area (if available) to track speaker reliably.
     """
     picked: List[Dict[str, Any]] = []
 
@@ -78,14 +93,25 @@ def pick_best_frames_per_slide(
             faces = face_crops_cache.get(idx)
             if not faces:
                 continue
-            best = max(faces, key=lambda d: float(d.get("confidence", 0.0)))
+
+            # prefer largest face if area exists, else fallback to confidence
+            if any("area" in f for f in faces):
+                best = max(faces, key=lambda d: float(d.get("area", 0.0)))
+            else:
+                best = max(faces, key=lambda d: float(d.get("confidence", 0.0)))
+
             conf = float(best.get("confidence", 0.0))
-            if conf >= cfg.min_face_conf and best.get("bbox") is not None:
-                candidates.append((conf, int(idx), best["bbox"]))
+            bbox = best.get("bbox")
+            if bbox is None:
+                continue
+            if conf >= cfg.min_face_conf:
+                area = float(best.get("area", 0.0))
+                candidates.append((area, conf, int(idx), bbox))
 
-        candidates.sort(reverse=True, key=lambda x: x[0])
+        # sort by area desc then confidence desc
+        candidates.sort(reverse=True, key=lambda x: (x[0], x[1]))
 
-        for conf, idx, bbox in candidates[: cfg.frames_per_slide_max]:
+        for _, conf, idx, bbox in candidates[: cfg.frames_per_slide_max]:
             picked.append({
                 "slide_id": int(slide_id),
                 "frame_idx": int(idx),
@@ -93,7 +119,6 @@ def pick_best_frames_per_slide(
                 "bbox": bbox,
             })
 
-    # global cap
     picked.sort(key=lambda r: (r["slide_id"], -r["face_conf"]))
     if len(picked) > cfg.max_total_frames:
         picked = picked[: cfg.max_total_frames]
@@ -193,7 +218,7 @@ def analyze_emotions(
     bs = int(cfg.batch_size)
 
     for i in range(0, len(face_crops_rgb), bs):
-        batch = face_crops_rgb[i:i+bs]
+        batch = face_crops_rgb[i:i + bs]
         features = fer.extract_features(batch)
         _, scores = fer.classify_emotions(features, logits=True)
         all_scores.extend(scores)
@@ -202,14 +227,19 @@ def analyze_emotions(
             _force_cleanup()
 
     all_scores = np.array(all_scores)  # (N, num_emotions)
+    if all_scores.ndim != 2 or all_scores.shape[0] != len(face_meta):
+        raise RuntimeError("Emotion model returned unexpected score shape.")
+
+    # If logits, compute probability distribution for entropy/margins
+    probs = _softmax(all_scores)
 
     # ---- Overall stats ----
-    avg_scores = np.mean(all_scores, axis=0)
+    avg_scores = np.mean(probs, axis=0)
     emotion_idx = int(np.argmax(avg_scores))
     most_common_emotion = fer.idx_to_emotion_class[emotion_idx]
 
     emotion_counts = defaultdict(int)
-    for row in all_scores:
+    for row in probs:
         eidx = int(np.argmax(row))
         emotion_counts[fer.idx_to_emotion_class[eidx]] += 1
 
@@ -219,55 +249,80 @@ def analyze_emotions(
         "emotion_distribution": dict(emotion_counts),
         "total_faces_analyzed": int(len(face_crops_rgb)),
         "average_scores": {fer.idx_to_emotion_class[i]: float(s) for i, s in enumerate(avg_scores)},
+        "avg_entropy": float(np.mean([_entropy(p) for p in probs])),
     }
 
     # ---- Slide-level aggregation ----
-    per_slide_scores = defaultdict(list)
+    per_slide_probs = defaultdict(list)
     per_slide_frames = defaultdict(list)
 
-    for meta, score in zip(face_meta, all_scores):
-        sid = meta["slide_id"]
-        per_slide_scores[sid].append(score)
+    for meta, p in zip(face_meta, probs):
+        sid = int(meta["slide_id"])
+        eidx = int(np.argmax(p))
+        # dominant margin = top1 - top2 (stability proxy)
+        top2 = np.partition(p, -2)[-2:]
+        margin = float(np.max(top2) - np.min(top2))
+
+        per_slide_probs[sid].append(p)
         per_slide_frames[sid].append({
-            "frame_idx": meta["frame_idx"],
+            "frame_idx": int(meta["frame_idx"]),
             "face_conf": float(meta["face_conf"]),
-            "emotion": fer.idx_to_emotion_class[int(np.argmax(score))],
-            "confidence": float(np.max(score)),
+            "emotion": fer.idx_to_emotion_class[eidx],
+            "confidence": float(np.max(p)),
+            "entropy": _entropy(p),
+            "dominant_margin": margin,
         })
 
-    slide_summaries = {}
+    slide_summaries: Dict[str, Any] = {}
 
     for sid in sorted(slide_frame_mapping.keys()):
+        sampled_total = len(slide_frame_mapping[sid].get("frame_indices", []))
         frames = per_slide_frames.get(sid, [])
-        if len(frames) < cfg.min_valid_frames_for_slide:
+        valid_faces = len(frames)
+        coverage_ratio = (valid_faces / sampled_total) if sampled_total else 0.0
+
+        if valid_faces < cfg.min_valid_frames_for_slide:
             slide_summaries[str(sid)] = {
                 "dominant_emotion": "no_face",
                 "emotion_frequency": 0.0,
-                "emotion_distribution": {"no_face": slide_frame_mapping[sid].get("frames_with_faces", 0)},
-                "total_frames": int(slide_frame_mapping[sid].get("frames_with_faces", 0) + slide_frame_mapping[sid].get("frames_without_faces", 0)),
-                "total_faces": 0,
+                "emotion_distribution": {"no_face": valid_faces},
+                "sampled_frames": int(sampled_total),
+                "valid_faces": int(valid_faces),
+                "coverage_ratio": float(coverage_ratio),
                 "avg_confidence": 0.0,
+                "avg_entropy": 0.0,
+                "avg_dominant_margin": 0.0,
                 "has_valid_emotions": False,
+                "top_frames": [],
                 "slide_content": idx_to_slide.get(int(sid), {}).get("slide_content", ""),
                 "audio_content": idx_to_slide.get(int(sid), {}).get("audio_content", ""),
             }
             continue
 
-        # distribution
+        # distribution & dominant
         dist = Counter([f["emotion"] for f in frames])
         dominant = dist.most_common(1)[0][0]
-        valid_total = sum(dist.values())
-        freq = dist[dominant] / max(1, valid_total)
+        freq = dist[dominant] / max(1, sum(dist.values()))
+
         avg_conf = float(np.mean([f["confidence"] for f in frames])) if frames else 0.0
+        avg_ent = float(np.mean([f["entropy"] for f in frames])) if frames else 0.0
+        avg_margin = float(np.mean([f["dominant_margin"] for f in frames])) if frames else 0.0
+
+        # evidence frames: top by confidence
+        top_frames = sorted(frames, key=lambda r: r["confidence"], reverse=True)[: cfg.top_frames_per_slide]
 
         slide_summaries[str(sid)] = {
             "dominant_emotion": dominant,
             "emotion_frequency": float(freq),
             "emotion_distribution": dict(dist),
-            "total_frames": int(len(frames)),
-            "total_faces": int(len(frames)),  # 1 best face per sampled frame in your cache
-            "avg_confidence": avg_conf,
-            "has_valid_emotions": dominant != "no_face",
+            "sampled_frames": int(sampled_total),
+            "valid_faces": int(valid_faces),
+            "coverage_ratio": float(round(coverage_ratio, 3)),
+            "avg_confidence": float(avg_conf),
+            "avg_entropy": float(avg_ent),
+            "avg_dominant_margin": float(avg_margin),
+            "has_valid_emotions": True,
+            "top_frames": top_frames,  # includes frame_idx for citations
             "slide_content": idx_to_slide.get(int(sid), {}).get("slide_content", ""),
             "audio_content": idx_to_slide.get(int(sid), {}).get("audio_content", ""),
         }
@@ -280,7 +335,8 @@ def analyze_emotions(
             "min_face_conf": cfg.min_face_conf,
             "expand_scale": cfg.expand_scale,
             "min_face_size": cfg.min_face_size,
-        }
+            "batch_size": cfg.batch_size,
+        },
     }
 
     return {

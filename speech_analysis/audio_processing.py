@@ -1,8 +1,10 @@
-# speaker_trainer/speech_analysis/audio_processing.py
+# ============================
+# FILE: speech_analysis/audio_processing.py
+# UPDATES: segments_raw, improved speech rate, improved filler counting, noise summary
+# ============================
 
 from __future__ import annotations
 
-# ---------- stdlib ----------
 import os
 import string
 import tempfile
@@ -10,11 +12,8 @@ import shutil
 import logging
 import atexit
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
-from concurrent.futures import ProcessPoolExecutor
-
-# ---------- third-party ----------
 from moviepy import VideoFileClip
 import whisper_timestamped
 import nltk
@@ -23,9 +22,8 @@ import librosa
 import noisereduce as nr
 import scipy.io.wavfile as wavf
 import numpy as np
-from pystoi import stoi
 from nltk.tokenize import TreebankWordTokenizer
-
+from pystoi import stoi  # NOTE: kept, but intelligibility will be revisited later
 
 # =========================================================
 # Model cache (project-local, agent-safe)
@@ -33,9 +31,7 @@ from nltk.tokenize import TreebankWordTokenizer
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODEL_CACHE = PROJECT_ROOT / "model_cache"
 MODEL_CACHE.mkdir(parents=True, exist_ok=True)
-
 os.environ.setdefault("XDG_CACHE_HOME", str(MODEL_CACHE))
-
 
 # =========================================================
 # Logging
@@ -43,8 +39,27 @@ os.environ.setdefault("XDG_CACHE_HOME", str(MODEL_CACHE))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+import re
+
+_WORD_RE = re.compile(r"[A-Za-z]")
+
+def normalize_token(t: str) -> str:
+    t = (t or "").lower().strip()
+    t = t.replace("’", "'")
+    t = t.strip(string.punctuation)
+    return t
+
+def is_countable_word(t: str) -> bool:
+    t = normalize_token(t)
+    if not t:
+        return False
+    if _WORD_RE.search(t) is None:
+        return False
+    if len(t) == 1 and t not in {"a", "i"}:
+        return False
+    return True
+
 def ensure_ffmpeg_on_path() -> None:
-    import os
     import shutil
     from pathlib import Path
 
@@ -58,10 +73,15 @@ def ensure_ffmpeg_on_path() -> None:
         ffmpeg_exe = Path(imageio_ffmpeg.get_ffmpeg_exe())
         ffmpeg_dir = ffmpeg_exe.parent
 
-        # Whisper expects ffmpeg.exe on PATH
+        # Whisper expects ffmpeg.exe on PATH (Windows).
+        # On Linux/Mac, ffmpeg_exe is already an executable; no copy needed,
+        # but this doesn't hurt if it exists.
         target = ffmpeg_dir / "ffmpeg.exe"
-        if not target.exists():
-            _shutil.copyfile(ffmpeg_exe, target)
+        if not target.exists() and ffmpeg_exe.exists():
+            try:
+                _shutil.copyfile(ffmpeg_exe, target)
+            except Exception:
+                pass
 
         os.environ["PATH"] = str(ffmpeg_dir) + os.pathsep + os.environ.get("PATH", "")
 
@@ -75,8 +95,6 @@ def ensure_ffmpeg_on_path() -> None:
             "ffmpeg not found. Install system ffmpeg or `uv pip install imageio-ffmpeg`."
         ) from e
 
-
-
 # =========================================================
 # NLTK (download once)
 # =========================================================
@@ -84,7 +102,6 @@ try:
     nltk.data.find("tokenizers/punkt")
 except LookupError:
     nltk.download("punkt", quiet=True)
-
 
 # =========================================================
 # Temp directory cleanup (important for notebooks)
@@ -97,7 +114,6 @@ def _cleanup_temp_dirs():
 
 atexit.register(_cleanup_temp_dirs)
 
-
 # =========================================================
 # Whisper model cache (in-process)
 # =========================================================
@@ -108,8 +124,6 @@ def get_whisper_model(model_size: str):
         logger.info("Loading Whisper model: %s", model_size)
         _WHISPER_MODELS[model_size] = whisper_timestamped.load_model(model_size)
     return _WHISPER_MODELS[model_size]
-
-
 
 # =========================================================
 # Automatic Speech Recognition
@@ -132,7 +146,7 @@ class AutomaticSpeechRecognition:
                 logger=None,
             )
             self.duration = clip.duration
-        except Exception as e:
+        except Exception:
             logger.exception("Audio extraction failed")
             raise
 
@@ -156,19 +170,18 @@ class AutomaticSpeechRecognition:
 
         self._trim_invalid_segments()
 
-        cleaned_text = self._clean_text(self.transcription["text"])
+        # Keep BOTH cleaned full text + raw segments
+        cleaned_text = self._clean_text(self.transcription.get("text", ""))
+
         words, noise = self._split_words_and_noise()
 
-        segments = [
-            {
-                "start": seg["start"],
-                "end": seg["end"],
-                "text": seg["text"],
-            }
-            for seg in self.transcription.get("segments", [])
+        segments_raw = list(self.transcription.get("segments", []))
+        segments_compact = [
+            {"start": seg.get("start", 0.0), "end": seg.get("end", 0.0), "text": seg.get("text", "")}
+            for seg in segments_raw
         ]
 
-        return cleaned_text, words, noise, segments
+        return cleaned_text, words, noise, segments_compact, segments_raw
 
     def _clean_text(self, text: str) -> str:
         text = text.lower()
@@ -179,22 +192,26 @@ class AutomaticSpeechRecognition:
         words, noise = [], []
         for seg in self.transcription.get("segments", []):
             for w in seg.get("words", []):
-                if w["text"] == "[*]":
-                    noise.append((w["start"], w["end"]))
+                if w.get("text") == "[*]":
+                    noise.append((float(w.get("start", 0.0)), float(w.get("end", 0.0))))
                 else:
                     words.append(w)
+        # Keep words sorted by start (defensive)
+        try:
+            words.sort(key=lambda x: float(x.get("start", 0.0)))
+        except Exception:
+            pass
         return words, noise
 
     def _trim_invalid_segments(self):
-        segments = self.transcription["segments"]
+        segments = self.transcription.get("segments", [])
         valid = []
         for seg in segments:
-            if seg["end"] <= self.duration:
+            if seg.get("end", 0.0) <= self.duration:
                 valid.append(seg)
             else:
                 break
         self.transcription["segments"] = valid
-
 
 # =========================================================
 # Analysis components
@@ -202,25 +219,38 @@ class AutomaticSpeechRecognition:
 class FillerWordsAndPhrases:
     EN = {
         "words": {
-            "um","uh","like","so","just","actually",
-            "basically","really","yeah","okay","right","y'know"
+            "um", "uh", "erm", "ah", "hmm",
+            "like", "so", "just", "actually", "basically", "really",
+            "yeah", "ok", "okay", "right", "well",
+            "yknow", "youknow",
         },
         "phrases": {
-            "you know","i mean","you see",
-            "let's say","kind of","sort of"
+            "you know", "i mean", "kind of", "sort of", "you see", "let's say",
         },
     }
 
-    def __init__(self, text: str):
-        self.tokens = TreebankWordTokenizer().tokenize(text.lower())
+    def __init__(self, text: str, word_tokens: List[str] | None = None):
+        if word_tokens is not None and len(word_tokens) > 0:
+            tokens = word_tokens
+        else:
+            tokens = TreebankWordTokenizer().tokenize(text.lower())
+
+        # normalize
+        self.tokens = []
+        for t in tokens:
+            t = str(t).lower().replace("’", "'").strip()
+            if not t:
+                continue
+            self.tokens.append(t)
 
     def count(self):
-        word_counts = {}
-        phrase_counts = {}
+        word_counts: Dict[str, int] = {}
+        phrase_counts: Dict[str, int] = {}
 
         for t in self.tokens:
-            if t in self.EN["words"]:
-                word_counts[t] = word_counts.get(t, 0) + 1
+            t2 = t.replace(" ", "")
+            if t2 in self.EN["words"]:
+                word_counts[t2] = word_counts.get(t2, 0) + 1
 
         for i in range(len(self.tokens) - 1):
             phrase = f"{self.tokens[i]} {self.tokens[i+1]}"
@@ -229,35 +259,74 @@ class FillerWordsAndPhrases:
 
         return word_counts, phrase_counts
 
-
 class SpeechRate:
-    WINDOW = 60
-    MIN = 60
-    MAX = 140
-
-    def __init__(self, words):
+    def __init__(self, words, window_sec=30, slow_wpm=110, fast_wpm=170, min_window_sec=10):
         self.words = words
+        self.window_sec = window_sec
+        self.slow_wpm = slow_wpm
+        self.fast_wpm = fast_wpm
+        self.min_window_sec = min_window_sec
 
     def analyze(self):
-        slow, fast = [], []
+        """
+        Returns:
+          - windows: [{start,end,wpm,word_count}, ...]
+          - slow_intervals: [[start,end], ...]
+          - fast_intervals: [[start,end], ...]
+        """
         if not self.words:
-            return slow, fast
+            return [], [], []
 
-        start = self.words[0]["start"]
-        count = 0
+        try:
+            t0 = float(self.words[0]["start"])
+            t_end = float(self.words[-1]["end"])
+        except Exception:
+            return [], [], []
 
-        for w in self.words:
-            count += 1
-            if w["end"] - start >= self.WINDOW:
-                if count < self.MIN:
-                    slow.append([start, w["end"]])
-                elif count > self.MAX:
-                    fast.append([start, w["end"]])
-                start = w["start"]
-                count = 1
+        windows = []
+        slow, fast = [], []
 
-        return slow, fast
+        cur_start = t0
+        # We assume words are sorted by start
+        wi = 0
+        n = len(self.words)
 
+        while cur_start < t_end:
+            cur_end = min(cur_start + self.window_sec, t_end)
+            dur = cur_end - cur_start
+            if dur < self.min_window_sec:
+                break
+
+            # count words overlapping [cur_start,cur_end)
+            # advance pointer to first word that might overlap
+            while wi < n and float(self.words[wi].get("end", 0.0)) <= cur_start:
+                wi += 1
+
+            count = 0
+            wj = wi
+            while wj < n and float(self.words[wj].get("start", 0.0)) < cur_end:
+                tok = str(self.words[wj].get("text", ""))
+                if is_countable_word(tok):
+                    count += 1
+                wj += 1
+
+
+            wpm = (count / dur) * 60.0 if dur > 0 else 0.0
+            windows.append({
+                "start": round(cur_start, 3),
+                "end": round(cur_end, 3),
+                "wpm": round(wpm, 1),
+                "word_count": int(count),
+            })
+
+            if wpm < self.slow_wpm:
+                slow.append([round(cur_start, 3), round(cur_end, 3)])
+            elif wpm > self.fast_wpm:
+                fast.append([round(cur_start, 3), round(cur_end, 3)])
+
+            cur_start = cur_end
+
+        return windows, slow, fast
 
 class BackgroundNoise:
     def __init__(self, noise, window=30, threshold=0.45):
@@ -266,6 +335,7 @@ class BackgroundNoise:
         self.threshold = threshold
 
     def analyze(self):
+        # (unchanged: keep your interval detector)
         results = []
         if not self.noise:
             return results
@@ -281,63 +351,101 @@ class BackgroundNoise:
                 results.append([self.noise[start][0], self.noise[end][1]])
         return results
 
-
-class Intelligibility:
-    def __init__(self, wav_path: str, segment_len: int = 10):
-        self.wav_path = wav_path
-        self.segment_len = segment_len
+class IntelligibilityFromASR:
+    def __init__(
+        self,
+        segments_raw,
+        low_conf_threshold: float = 0.55,
+        nospeech_threshold: float = 0.6,
+    ):
+        self.segments_raw = segments_raw or []
+        self.low_conf_threshold = low_conf_threshold
+        self.nospeech_threshold = nospeech_threshold
 
     @staticmethod
-    def _stoi_segment(args):
-        import os
-        import wave
-        import librosa
-        import noisereduce as nr
-        import scipy.io.wavfile as wavf
-        import numpy as np
-        from pystoi import stoi
+    def _clamp01(x: float) -> float:
+        return max(0.0, min(1.0, x))
 
-        wav_path, i, seg_len = args
-
-        clip = wave.open(wav_path)
-        duration = clip.getnframes() / clip.getframerate()
-
-        start = i * seg_len
-        end = min((i + 1) * seg_len, duration)
-
-        data, rate = librosa.load(wav_path, offset=start, duration=end - start)
-        reduced = nr.reduce_noise(y=data, sr=rate)
-
-        tmp = f"tmp_{os.getpid()}_{i}.wav"
-        wavf.write(tmp, rate, reduced)
-
-        clean, _ = librosa.load(tmp)
-        orig, _ = librosa.load(wav_path, offset=start, duration=end - start)
-
+    @staticmethod
+    def _normalize_avg_logprob(avg_logprob: float) -> float:
+        """
+        avg_logprob is typically negative. Roughly:
+          -1.0 (good) to -3.0 (bad) depending on audio/model.
+        Map [-3.0, -1.0] -> [0,1].
+        """
+        if avg_logprob is None:
+            return 0.5
         try:
-            os.remove(tmp)
+            x = float(avg_logprob)
         except Exception:
-            pass
-
-        return i, float(np.round(stoi(clean, orig, rate), 3))
+            return 0.5
+        # map -3 -> 0, -1 -> 1
+        return IntelligibilityFromASR._clamp01((x - (-3.0)) / ((-1.0) - (-3.0)))
 
     def compute(self):
-        import wave
-        import numpy as np
+        per_segment = []
+        low_conf_intervals = []
 
-        clip = wave.open(self.wav_path)
-        duration = clip.getnframes() / clip.getframerate()
-        segments = int(np.ceil(duration / self.segment_len))
-        scores = np.zeros(segments)
+        for seg in self.segments_raw:
+            start = float(seg.get("start", 0.0))
+            end = float(seg.get("end", start))
+            conf = seg.get("confidence", None)
+            nsp = seg.get("no_speech_prob", None)
+            alp = seg.get("avg_logprob", None)
 
-        # Windows-safe: sequential by default
-        args = [(self.wav_path, i, self.segment_len) for i in range(segments)]
-        for i, s in map(Intelligibility._stoi_segment, args):
-            scores[i] = s
+            # confidence sometimes missing or not 0..1; guard it
+            try:
+                conf_f = float(conf) if conf is not None else None
+            except Exception:
+                conf_f = None
 
-        return scores
+            try:
+                nsp_f = float(nsp) if nsp is not None else 0.0
+            except Exception:
+                nsp_f = 0.0
 
+            alp_score = self._normalize_avg_logprob(alp)
 
+            # Combine signals:
+            # - main weight: confidence
+            # - secondary: avg_logprob normalization
+            # - penalty: no_speech_prob (if high, likely silence or non-speech)
+            if conf_f is None:
+                score = 0.6 * alp_score + 0.4 * (1.0 - self._clamp01(nsp_f))
+            else:
+                score = 0.7 * self._clamp01(conf_f) + 0.3 * alp_score
+                # penalty for likely no-speech
+                if nsp_f >= self.nospeech_threshold:
+                    score *= 0.6
+
+            score = self._clamp01(score)
+
+            per_segment.append({
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "score": round(score, 3),
+                "confidence": None if conf_f is None else round(self._clamp01(conf_f), 3),
+                "avg_logprob": None if alp is None else float(alp),
+                "no_speech_prob": round(self._clamp01(nsp_f), 3),
+            })
+
+            if score < self.low_conf_threshold:
+                low_conf_intervals.append([round(start, 3), round(end, 3)])
+
+        # global score: duration-weighted average
+        total_dur = 0.0
+        weighted = 0.0
+        for s in per_segment:
+            dur = max(0.0, s["end"] - s["start"])
+            total_dur += dur
+            weighted += dur * s["score"]
+        global_score = (weighted / total_dur) if total_dur > 0 else 0.0
+
+        return {
+            "global_score": round(float(global_score), 3),
+            "per_segment": per_segment,
+            "low_confidence_intervals": low_conf_intervals,
+        }
 
 # =========================================================
 # 🎯 Final SpeechProcessingSubsystem
@@ -351,9 +459,10 @@ class SpeechProcessingSubsystem:
         intelligibility_segment_len: int = 10,
     ):
         asr = AutomaticSpeechRecognition(video_path, lang, whisper_model_size)
-        text, words, noise, segments = asr.transcribe()
+        text, words, noise, segments_compact, segments_raw = asr.transcribe()
 
-        self.segments = segments
+        self.segments = segments_compact
+        self.segments_raw = segments_raw
         self.text = text
         self.words = words
         self.noise = noise
@@ -361,21 +470,40 @@ class SpeechProcessingSubsystem:
         self.seg_len = intelligibility_segment_len
 
     def run(self) -> Dict:
-        fillers = FillerWordsAndPhrases(self.text)
-        slow, fast = SpeechRate(self.words).analyze()
+        # build word tokens from whisper words (more faithful than cleaned transcript)
+        word_tokens: List[str] = []
+        for w in self.words:
+            t = normalize_token(str(w.get("text", "")))
+            if t:
+                word_tokens.append(t)
+
+        fillers = FillerWordsAndPhrases(self.text, word_tokens=word_tokens)
+        filler_words, filler_phrases = fillers.count()
+
+        rate_windows, slow, fast = SpeechRate(self.words).analyze()
+
         noise_intervals = BackgroundNoise(self.noise).analyze()
-        intelligibility = Intelligibility(self.wav_path, self.seg_len).compute()
+        total_noise = float(sum((b - a) for a, b in self.noise)) if self.noise else 0.0
+        duration = float(self.words[-1]["end"] - self.words[0]["start"]) if self.words else 0.0
+        noise_fraction = (total_noise / duration) if duration > 0 else 0.0
+
+        intel = IntelligibilityFromASR(self.segments_raw).compute()
 
         return {
             "transcription": self.text,
-            "segments": self.segments,
-            "filler_words": fillers.count()[0],
-            "filler_phrases": fillers.count()[1],
+            "segments": self.segments,               # compact for alignment
+            "segments_raw": self.segments_raw,       # full whisper segments for confidence later
+            "filler_words": filler_words,
+            "filler_phrases": filler_phrases,
             "speech_rate": {
+                "windows": rate_windows,
                 "slow": slow,
                 "fast": fast,
             },
-            "background_noise": noise_intervals,
-            "intelligibility": intelligibility.tolist(),
+            "background_noise": {
+                "intervals": noise_intervals,
+                "total_noise_sec": round(total_noise, 2),
+                "fraction": round(noise_fraction, 3),
+            },
+            "intelligibility": intel,
         }
-

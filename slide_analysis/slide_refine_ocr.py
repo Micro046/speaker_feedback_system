@@ -170,7 +170,7 @@ class SlideOCRRefiner:
 
         self.processor = AutoProcessor.from_pretrained(
             self.cfg.ocr_model_id,
-            size={"shortest_edge": 56 * 56, "longest_edge": 28 * 28 * 1280},
+            # size={"shortest_edge": 56 * 56, "longest_edge": 28 * 28 * 1280},
         )
 
         dtype = torch.bfloat16 if self.cfg.device.startswith("cuda") else torch.float32
@@ -228,18 +228,19 @@ class SlideOCRRefiner:
         ).to(self.cfg.device)
 
         with torch.inference_mode():
-            output_ids = self.model.generate(**inputs, max_new_tokens=1024)
+            output_ids = self.model.generate(**inputs, max_new_tokens=512)
 
         gen = [out[len(inp):] for inp, out in zip(inputs.input_ids, output_ids)]
         raw = self.processor.batch_decode(gen, skip_special_tokens=True)[0]
         return ocr_cleanup(raw)
 
-    def _ocr_at_time(self, cap: cv2.VideoCapture, t: float) -> str:
+    def _ocr_at_time(self, cap: cv2.VideoCapture, t: float, fps: float) -> str:
         key = int(round(t * 1000))
         if key in self._ocr_cache:
             return self._ocr_cache[key]
 
-        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
+        frame_idx = int(round(t * fps))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ok, frame = cap.read()
         if not ok or frame is None:
             self._ocr_cache[key] = ""
@@ -249,6 +250,7 @@ class SlideOCRRefiner:
         self._ocr_cache[key] = txt
         return txt
 
+
     # ---------------- main refinement ----------------
     def refine_segments(self, video_path: str, ssim_segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not ssim_segments:
@@ -257,6 +259,9 @@ class SlideOCRRefiner:
         cap = cv2.VideoCapture(str(Path(video_path).resolve()))
         if not cap.isOpened():
             raise RuntimeError(f"Failed to open video: {video_path}")
+
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+
 
         refined: List[Dict[str, Any]] = []
         current: Optional[Dict[str, Any]] = None
@@ -278,7 +283,7 @@ class SlideOCRRefiner:
             best_time = sample_times[1]
 
             for t in sample_times:
-                txt = self._ocr_at_time(cap, t)
+                txt = self._ocr_at_time(cap, t,fps)
                 sc = ocr_quality_score(txt)
                 if sc > best_score:
                     best_text = txt

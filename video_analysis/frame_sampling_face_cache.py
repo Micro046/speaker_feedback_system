@@ -82,7 +82,9 @@ class FaceCacheConfig:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def build_slide_frame_mapping(segments: List[Dict[str, Any]], fps: float, per_slide_frames: int) -> Dict[int, Dict[str, Any]]:
+def build_slide_frame_mapping(
+    segments: List[Dict[str, Any]], fps: float, per_slide_frames: int
+) -> Dict[int, Dict[str, Any]]:
     slide_frame_mapping: Dict[int, Dict[str, Any]] = {}
 
     for seg in segments:
@@ -98,6 +100,8 @@ def build_slide_frame_mapping(segments: List[Dict[str, Any]], fps: float, per_sl
             "face_count_per_frame": {},
             "frames_with_faces": 0,
             "frames_without_faces": 0,
+            # filled later:
+            "face_detection_rate": 0.0,
         }
 
     return slide_frame_mapping
@@ -115,7 +119,7 @@ def build_face_cache(
       {
         "fps": float,
         "slide_frame_mapping": { slide_id: {...} },
-        "face_crops_cache": { frame_idx: [ {bbox:[x1,y1,x2,y2], confidence:float} ] },
+        "face_crops_cache": { frame_idx: [ {bbox:[x1,y1,x2,y2], confidence:float, area:float} ] },
         "stats": {...}
       }
     """
@@ -130,7 +134,9 @@ def build_face_cache(
     for sid, m in slide_frame_mapping.items():
         for idx in m["frame_indices"]:
             all_frame_indices.append(idx)
-            frame_to_slide[idx] = sid
+            # IMPORTANT: prevent overwriting if two slides share the same rounded frame index
+            if idx not in frame_to_slide:
+                frame_to_slide[idx] = sid
 
     all_frame_indices = sorted(set(all_frame_indices))
 
@@ -149,18 +155,30 @@ def build_face_cache(
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")
 
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
     t0 = time.time()
     total_processed = 0
 
     def read_frame_by_idx(idx: int):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+        # clamp idx defensively
+        if frame_count > 0:
+            idx = max(0, min(frame_count - 1, int(idx)))
+        else:
+            idx = int(idx)
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
         ok, frame = cap.read()
         return ok, frame
 
+    def box_area_xyxy(b: np.ndarray) -> float:
+        x1, y1, x2, y2 = float(b[0]), float(b[1]), float(b[2]), float(b[3])
+        return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
     for i in range(0, len(all_frame_indices), cfg.batch_size):
         batch_idxs = all_frame_indices[i : i + cfg.batch_size]
-        batch_rgb = []
-        valid_idxs = []
+        batch_rgb: List[np.ndarray] = []
+        valid_idxs: List[int] = []
         scales: Dict[int, float] = {}
 
         for idx in batch_idxs:
@@ -171,7 +189,9 @@ def build_face_cache(
             h, w = frame.shape[:2]
             if w > cfg.resize_max_width:
                 scale = cfg.resize_max_width / float(w)
-                frame_small = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+                frame_small = cv2.resize(
+                    frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA
+                )
             else:
                 scale = 1.0
                 frame_small = frame
@@ -197,12 +217,21 @@ def build_face_cache(
 
             best = None
             if boxes is not None and probs is not None:
-                candidates = [(b, p) for b, p in zip(boxes, probs) if p is not None and float(p) >= cfg.prob_thresh]
+                candidates = [
+                    (b, p)
+                    for b, p in zip(boxes, probs)
+                    if p is not None and float(p) >= cfg.prob_thresh
+                ]
                 if candidates:
-                    b, p = max(candidates, key=lambda x: float(x[1]))
+                    # pick the largest face (more reliable than max prob)
+                    b, p = max(candidates, key=lambda x: box_area_xyxy(x[0]))
                     scale = scales[idx]
                     x1, y1, x2, y2 = [int(coord / scale) for coord in b[:4]]
-                    best = {"bbox": [x1, y1, x2, y2], "confidence": float(p)}
+                    best = {
+                        "bbox": [x1, y1, x2, y2],
+                        "confidence": float(p),
+                        "area": float(box_area_xyxy(b) / (scale * scale)),
+                    }
 
             if best is not None:
                 face_crops_cache[idx] = [best]
@@ -219,6 +248,11 @@ def build_face_cache(
 
     cap.release()
     _force_cleanup()
+
+    # finalize per-slide detection rates
+    for sid, m in slide_frame_mapping.items():
+        total = int(m["frames_with_faces"]) + int(m["frames_without_faces"])
+        m["face_detection_rate"] = (float(m["frames_with_faces"]) / total) if total else 0.0
 
     t1 = time.time()
     stats = {

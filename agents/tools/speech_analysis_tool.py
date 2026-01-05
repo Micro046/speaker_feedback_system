@@ -1,3 +1,7 @@
+# ============================
+# FILE: agents/tools/speech_analysis.py
+# (no functional change required; keeping for completeness)
+# ============================
 from __future__ import annotations
 
 from pathlib import Path
@@ -29,12 +33,13 @@ def analyze_speech_tool(
     whisper_model_size: str = "small",
     intelligibility_segment_len: int = 10,
 ) -> Dict:
-    """
-    Backwards-compatible alias used by the tool registry / notebooks.
-    """
+    """Backwards-compatible alias used by the tool registry / notebooks."""
     return analyze_speech(
         video_path=video_path,
         language=language,
         whisper_model_size=whisper_model_size,
         intelligibility_segment_len=intelligibility_segment_len,
     )
+
+
+

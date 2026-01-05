@@ -1,88 +1,149 @@
+# agents/tools/recommendation_tool.py
 from __future__ import annotations
 
-import json
-from typing import Any, Dict, Optional
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Optional
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def _build_nemo_prompt(payload: Dict[str, Any]) -> str:
-    return (
-        "You are a presentation coach agent. Use the provided JSON payload to create "
-        "actionable, per-slide and overall recommendations. Use a ReAct-style internal "
-        "reasoning process, but do NOT output reasoning. Output only JSON with keys "
-        "`overall` (list of strings) and `per_slide` (dict keyed by slide_id). "
-        "Each per_slide entry should include `strengths` and `improvements`. "
-        "Incorporate slide tables/figures from `ocr_parsed` when relevant. "
-        "Keep each recommendation short and specific.\n\n"
-        f"PAYLOAD:\n{json.dumps(payload, indent=2)}\n"
+def _strip_ansi(text: str) -> str:
+    return _ANSI_ESCAPE_RE.sub("", text)
+
+
+def _extract_workflow_result(text: str) -> str:
+    cleaned = _strip_ansi(text)
+    marker = "Workflow Result:"
+    if marker not in cleaned:
+        return cleaned.strip()
+    tail = cleaned.split(marker, 1)[1]
+    lines = [line.rstrip() for line in tail.splitlines()]
+    result_lines = []
+    for line in lines:
+        if line.strip().startswith("-" * 5):
+            break
+        if line.strip() == "":
+            if result_lines:
+                result_lines.append("")
+            continue
+        result_lines.append(line)
+    return "\n".join(result_lines).strip()
+
+def _ensure_venv_bin_on_path() -> None:
+    venv_bin = str(Path(sys.executable).resolve().parent)
+    path = os.environ.get("PATH", "")
+    parts = path.split(os.pathsep) if path else []
+    if venv_bin not in parts:
+        os.environ["PATH"] = os.pathsep.join([venv_bin, path]) if path else venv_bin
+        
+
+
+
+def _nat_run_help(nat_bin: str) -> str:
+    proc = subprocess.run(
+        [nat_bin, "run", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
     )
+    return (proc.stdout or "") + "\n" + (proc.stderr or "")
 
 
-def _run_nemo_agent(nemo_agent, prompt: str) -> str:
-    if hasattr(nemo_agent, "run"):
-        return nemo_agent.run(prompt)
-    if hasattr(nemo_agent, "invoke"):
-        return nemo_agent.invoke(prompt)
-    if hasattr(nemo_agent, "chat"):
-        return nemo_agent.chat(prompt)
-    raise RuntimeError("Unsupported NeMo agent interface (no run/invoke/chat method).")
-
-
-def _strip_code_fence(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        parts = text.split("```")
-        if len(parts) >= 3:
-            return parts[1].strip()
-    return text
-
-
-def _parse_nemo_json(raw: Any) -> Dict[str, Any]:
-    if isinstance(raw, dict):
-        return raw
-    if raw is None:
-        raise ValueError("NeMo response is empty.")
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8", errors="ignore")
-    if not isinstance(raw, str):
-        raw = str(raw)
-
-    text = _strip_code_fence(raw)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end > start:
-            return json.loads(text[start:end + 1])
-    raise ValueError("NeMo response is not valid JSON.")
-
-
-def build_recommendations(
-    payload: Dict[str, Any],
+def run_nemo_react_recommendations(
     *,
-    nemo_agent: Optional[object] = None,
-) -> Dict[str, Any]:
-    """
-    Build recommendations using NeMo ReAct agent only.
-    """
-    if nemo_agent is None:
-        raise ValueError("nemo_agent is required for recommendations.")
+    config_file: str,
+    user_input: str,
+    nat_bin: str = "nat",
+    cwd: Optional[str] = None,
+    log_level: str = "INFO",  # kept for API compatibility, may be unused
+) -> str:
+    _ensure_venv_bin_on_path()
 
-    prompt = _build_nemo_prompt(payload)
-    raw = _run_nemo_agent(nemo_agent, prompt)
-    parsed = _parse_nemo_json(raw)
+    if shutil.which(nat_bin) is None:
+        raise FileNotFoundError(
+            f"'{nat_bin}' not found on PATH. PATH={os.environ.get('PATH','')}"
+        )
 
-    overall = parsed.get("overall", [])
-    per_slide = parsed.get("per_slide", {})
-    if not isinstance(overall, list) or not isinstance(per_slide, dict):
-        raise ValueError("NeMo response must include `overall` list and `per_slide` dict.")
+    cfg = str(Path(config_file).expanduser().resolve())
 
-    raw_preview = raw if isinstance(raw, str) else json.dumps(raw)
-    return {
-        "overall": overall,
-        "per_slide": per_slide,
-        "meta": {
-            "mode": "nemo",
-            "raw_preview": raw_preview[:2000],
-        },
-    }
+    help_text = _nat_run_help(nat_bin)
+
+    # Pick the config flag
+    if "--config_file" in help_text:
+        config_flag = "--config_file"
+    elif "--config-file" in help_text:
+        config_flag = "--config-file"
+    else:
+        raise RuntimeError(f"Can't find a config option in `nat run --help`:\n{help_text}")
+
+    # Pick the input flag (prefer file input for long prompts)
+    input_file_flag = None
+    if "--input_file" in help_text:
+        input_file_flag = "--input_file"
+    elif "--input-file" in help_text:
+        input_file_flag = "--input-file"
+
+    if input_file_flag is None:
+        if "--input" in help_text:
+            input_flag = "--input"
+        elif "--user_input" in help_text:
+            input_flag = "--user_input"
+        elif "--user-input" in help_text:
+            input_flag = "--user-input"
+        else:
+            raise RuntimeError(f"Can't find an input option in `nat run --help`:\n{help_text}")
+
+    temp_input_path = None
+    if input_file_flag is not None:
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt", encoding="utf-8") as tmp:
+            tmp.write(user_input)
+            temp_input_path = tmp.name
+        cmd = [nat_bin, "run", config_flag, cfg, input_file_flag, temp_input_path]
+    else:
+        cmd = [nat_bin, "run", config_flag, cfg, input_flag, user_input]
+
+    # Add logging only if supported (and use the supported spelling)
+    if "--log_level" in help_text:
+        cmd += ["--log_level", log_level]
+    elif "--log-level" in help_text:
+        cmd += ["--log-level", log_level]
+    # else: don't pass any log option
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        if temp_input_path:
+            try:
+                Path(temp_input_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip()
+        out = (proc.stdout or "").strip()
+        msg = "\n".join(
+            [
+                f"nat run failed (code={proc.returncode})",
+                f"cmd: {cmd}",
+                "--- stderr ---",
+                err if err else "(empty)",
+                "--- stdout ---",
+                out if out else "(empty)",
+            ]
+        )
+        raise RuntimeError(msg)
+
+    full_output = "\n".join([proc.stdout or "", proc.stderr or ""]).strip()
+    return _extract_workflow_result(full_output)

@@ -17,20 +17,15 @@ def _force_cleanup():
 
 @dataclass
 class ClothingConfig:
-    # sampling
-    frames_per_slide_max: int = 4        # how many frames per slide to classify
-    min_face_conf: float = 0.55          # only trust face bbox above this
+    frames_per_slide_max: int = 4
+    min_face_conf: float = 0.55
 
-    # torso crop from face bbox
-    torso_scale_w: float = 2.2           # torso width ~= face_w * this
-    torso_scale_h: float = 3.2           # torso height ~= face_h * this
-    torso_shift_y: float = 1.15          # move down from face center
+    torso_scale_w: float = 2.2
+    torso_scale_h: float = 3.2
+    torso_shift_y: float = 1.15
 
-    # read performance
-    read_every_nth: int = 1              # keep 1 unless you want to skip
-
-    # safety
-    max_total_frames: int = 300          # hard cap to avoid runaway compute
+    read_every_nth: int = 1
+    max_total_frames: int = 300
 
 
 def _clamp_box(x1, y1, x2, y2, w, h):
@@ -42,11 +37,6 @@ def _clamp_box(x1, y1, x2, y2, w, h):
 
 
 def torso_crop_from_face_bbox(frame_bgr: np.ndarray, face_bbox: List[int], cfg: ClothingConfig) -> np.ndarray:
-    """
-    Make an upper-body / torso crop derived from face bbox.
-    frame_bgr: HxWx3
-    face_bbox: [x1,y1,x2,y2] in original frame coords
-    """
     h, w = frame_bgr.shape[:2]
     x1, y1, x2, y2 = face_bbox
     fw = max(1, x2 - x1)
@@ -58,7 +48,10 @@ def torso_crop_from_face_bbox(frame_bgr: np.ndarray, face_bbox: List[int], cfg: 
     torso_w = fw * cfg.torso_scale_w
     torso_h = fh * cfg.torso_scale_h
 
-    # shift down to include chest/torso
+    # guard: avoid huge background crops
+    torso_w = min(torso_w, w * 0.95)
+    torso_h = min(torso_h, h * 0.95)
+
     torso_cy = cy + fh * cfg.torso_shift_y
 
     tx1 = cx - torso_w / 2.0
@@ -67,7 +60,14 @@ def torso_crop_from_face_bbox(frame_bgr: np.ndarray, face_bbox: List[int], cfg: 
     ty2 = torso_cy + torso_h / 2.0
 
     tx1, ty1, tx2, ty2 = _clamp_box(tx1, ty1, tx2, ty2, w, h)
-    return frame_bgr[ty1:ty2, tx1:tx2]
+    crop = frame_bgr[ty1:ty2, tx1:tx2]
+
+    # fallback if crop is too small
+    if crop.size < 1000:
+        fx1, fy1, fx2, fy2 = _clamp_box(x1, y1, x2, y2, w, h)
+        return frame_bgr[fy1:fy2, fx1:fx2]
+
+    return crop
 
 
 def pick_best_frames_per_slide(
@@ -77,7 +77,7 @@ def pick_best_frames_per_slide(
 ) -> List[Dict[str, Any]]:
     """
     Returns a list of {slide_id, frame_idx, face_conf, bbox}.
-    Picks top-N frames per slide by face confidence.
+    Picks top-N frames per slide by face area (stable) with confidence >= min_face_conf.
     """
     picked: List[Dict[str, Any]] = []
 
@@ -87,15 +87,21 @@ def pick_best_frames_per_slide(
             faces = face_crops_cache.get(idx)
             if not faces:
                 continue
-            best = max(faces, key=lambda d: float(d.get("confidence", 0.0)))
-            conf = float(best.get("confidence", 0.0))
-            if conf >= cfg.min_face_conf:
-                candidates.append((conf, idx, best.get("bbox")))
 
-        candidates.sort(reverse=True, key=lambda x: x[0])
-        for conf, idx, bbox in candidates[: cfg.frames_per_slide_max]:
+            # prefer largest face (speaker) if area is available
+            best = max(faces, key=lambda d: float(d.get("area", 0.0)))
+            conf = float(best.get("confidence", 0.0))
+            bbox = best.get("bbox")
+
             if bbox is None:
                 continue
+            if conf >= cfg.min_face_conf:
+                candidates.append((float(best.get("area", 0.0)), conf, idx, bbox))
+
+        # sort by area desc, then confidence desc
+        candidates.sort(reverse=True, key=lambda x: (x[0], x[1]))
+
+        for _, conf, idx, bbox in candidates[: cfg.frames_per_slide_max]:
             picked.append({
                 "slide_id": int(slide_id),
                 "frame_idx": int(idx),
@@ -103,7 +109,6 @@ def pick_best_frames_per_slide(
                 "bbox": bbox,
             })
 
-    # global cap
     picked.sort(key=lambda r: (r["slide_id"], -r["face_conf"]))
     if len(picked) > cfg.max_total_frames:
         picked = picked[: cfg.max_total_frames]
@@ -119,11 +124,6 @@ def analyze_clothing(
     *,
     cfg: Optional[ClothingConfig] = None,
 ) -> Dict[str, Any]:
-    """
-    clothing_classifier must implement:
-      assess_appearance(list_of_frames_bgr_or_rgb, return_full=True) -> dict
-    We will pass RGB crops (recommended for CLIP).
-    """
     cfg = cfg or ClothingConfig()
 
     picked = pick_best_frames_per_slide(slide_frame_mapping, face_crops_cache, cfg)
@@ -157,6 +157,9 @@ def analyze_clothing(
             continue
 
         torso_bgr = torso_crop_from_face_bbox(frame_bgr, rec["bbox"], cfg)
+        if torso_bgr is None or torso_bgr.size == 0:
+            continue
+
         torso_rgb = cv2.cvtColor(torso_bgr, cv2.COLOR_BGR2RGB)
 
         sid = rec["slide_id"]
@@ -166,7 +169,6 @@ def analyze_clothing(
     cap.release()
     _force_cleanup()
 
-    # Flatten crops for classifier
     all_crops = []
     crop_owner = []
     for sid, crops in per_slide_frames_rgb.items():
@@ -183,10 +185,8 @@ def analyze_clothing(
             "per_slide": {},
         }
 
-    # Run classifier once for all crops
     out = clothing_classifier.assess_appearance(all_crops, return_full=True)
 
-    # Build slide coverage info
     slides_with_samples = len(per_slide_frames_rgb)
     per_slide = {
         str(sid): {
@@ -206,6 +206,6 @@ def analyze_clothing(
         },
         "per_slide": per_slide,
         "debug": {
-            "picked_frames": picked[:50],  # avoid huge JSON
+            "picked_frames": picked[:50],
         }
     }

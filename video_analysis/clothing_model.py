@@ -87,13 +87,13 @@ class ClothesCLIP:
 
         # Prompts tuned for presentation coaching (you can expand later)
         self.labels = [
-            "formal business attire",
-            "business casual attire",
-            "casual attire",
-            "revealing outfit",
-            "inappropriate outfit for a professional presentation",
-            "professional outfit suitable for presenting",
+            "formal business attire (suit, blazer, dress shirt)",
+            "business casual attire (collared shirt, blouse, smart casual)",
+            "casual attire (t-shirt, hoodie, relaxed wear)",
+            "sportswear or gym clothing",
+            "clothing that may be distracting in a professional presentation",
         ]
+
 
     def assess_appearance(self, frames_rgb: List[np.ndarray], *, return_full: bool = True) -> Dict[str, Any]:
         if not frames_rgb:
@@ -116,10 +116,10 @@ class ClothesCLIP:
         best = int(np.argmax(avg))
         best_label = self.labels[best]
         conf = float(avg[best])
-
-        # simple decision rule
-        inappropriate = {"revealing outfit", "inappropriate outfit for a professional presentation"}
-        is_appropriate = best_label not in inappropriate
+        is_appropriate = best_label not in {
+            "sportswear or gym clothing",
+            "clothing that may be distracting in a professional presentation",
+        }
 
         recommendation = (
             "Clothing appears appropriate for a professional presentation."
