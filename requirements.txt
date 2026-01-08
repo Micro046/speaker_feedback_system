@@ -23,6 +23,7 @@ emotiefflib
 imageio-ffmpeg
 nltk
 gdown
+pyyaml
 
 # ---- Hugging Face stack ----
 transformers

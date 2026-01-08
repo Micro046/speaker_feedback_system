@@ -1,9 +1,8 @@
 .venv/
 __pycache__/
 .ipynb_checkpoints/
-model_cache/
-video/
-outputs/
+data/
+.env
 *.pyc
 *.pyo
 *.pyd

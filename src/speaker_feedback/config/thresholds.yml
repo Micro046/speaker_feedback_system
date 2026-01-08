@@ -1,0 +1,124 @@
+# Global thresholds shared across modalities.
+# Update values here to keep the pipeline consistent.
+
+shared:
+  # Max sampled frames per slide for visual modalities.
+  frames_per_slide_max: 6
+  # Minimum face detector confidence to accept a crop.
+  min_face_conf: 0.55
+  # Crop expansion ratio around detected face for stable analysis.
+  expand_scale: 1.3
+  # Minimum face box size in pixels.
+  min_face_size: 48
+
+speech:
+  # Intelligibility window size in seconds.
+  intelligibility_segment_len: 10
+
+slides:
+  # Frame sampling interval (seconds) for SSIM transitions.
+  sample_every_sec: 1.0
+  # SSIM threshold to detect slide change.
+  ssim_thresh: 0.85
+  # Minimum duration in seconds to keep a slide segment.
+  min_segment_sec: 6.0
+  # OCR text similarity threshold to merge near-duplicate slides.
+  similarity_threshold: 0.80
+  # Minimum OCR word count to accept a slide.
+  min_word_count_for_slide: 12
+  # Frames per segment to rank for OCR.
+  ocr_sample_count: 3
+  # How many top-ranked frames to OCR.
+  top_k_ocr_frames: 2
+  # Weight applied to sharpness for frame ranking.
+  sharpness_weight: 0.15
+
+face_cache:
+  # Frames sampled per slide for face caching.
+  per_slide_frames: 12
+  # Batch size for face detection.
+  face_batch_size: 24
+
+clothing:
+  # CLIP model name for outfit analysis.
+  clip_model_name: openai/clip-vit-base-patch32
+  # Use local cached files only.
+  clip_local_files_only: false
+  # Max clothing frames per slide.
+  clothing_frames_per_slide_max: 4
+  # Minimum face confidence for clothing crop.
+  clothing_min_face_conf: 0.55
+
+gaze:
+  # Pitch angle indicating looking down (reading).
+  pitch_down_thresh: 14.0
+  # Yaw angle indicating looking sideways (slides).
+  yaw_side_thresh: 18.0
+  # Pitch angle indicating center gaze.
+  pitch_center_thresh: 12.0
+  # Yaw angle indicating center gaze.
+  yaw_center_thresh: 7.0
+  # Camera bias correction (positive shifts reduce false "downward" detection).
+  pitch_offset: 4.0
+  # Max frames per slide.
+  frames_per_slide_max: 6
+  # Minimum face confidence to accept frame.
+  min_face_conf: 0.55
+  # Minimum gaze confidence to accept frame.
+  min_gaze_conf: 0.2
+  # Minimum valid frames per slide to report.
+  min_valid_frames_per_slide: 2
+  # Minimum valid frame ratio per slide.
+  min_coverage_ratio: 0.2
+  # Minimum overall valid frame ratio.
+  min_overall_valid_ratio: 0.3
+  # Crop expansion ratio.
+  expand_scale: 1.3
+  # Minimum face box size in pixels.
+  min_face_size: 48
+
+emotion:
+  # Max frames per slide.
+  frames_per_slide_max: 6
+  # Minimum face confidence to accept frame.
+  min_face_conf: 0.55
+  # Minimum valid frames per slide to report.
+  min_valid_frames_per_slide: 2
+  # Minimum valid frame ratio per slide.
+  min_coverage_ratio: 0.2
+  # Minimum overall valid frame ratio.
+  min_overall_valid_ratio: 0.3
+  # Crop expansion ratio.
+  expand_scale: 1.3
+  # Minimum face box size in pixels.
+  min_face_size: 48
+  # Inference batch size for emotion model.
+  batch_size: 32
+
+gesture:
+  # Wrist-to-shoulder ratio to detect arms crossed.
+  arms_crossed_wrist_ratio: 0.5
+  # Wrist height ratio (chest band) to detect arms crossed.
+  arms_crossed_chest_y_ratio: 0.3
+  # Wrist-to-nose ratio to detect hand-to-face.
+  hand_to_face_ratio: 0.6
+  # Wrist spread ratio to detect open palms.
+  open_palms_ratio: 1.2
+  # YOLOv8 pose model path.
+  model_path: yolov8n-pose.pt
+  # Detection confidence threshold.
+  conf: 0.3
+  # Keypoint confidence threshold.
+  kp_conf: 0.3
+  # Max frames per slide.
+  frames_per_slide_max: 6
+  # Resize width for inference.
+  resize_w: 640
+  # Global max frames processed.
+  max_total_frames: 350
+  # Min contiguous frames to confirm an event.
+  min_event_frames: 3
+  # Minimum pose coverage ratio.
+  min_pose_coverage_ratio: 0.35
+  # Evidence frames per event.
+  top_evidence_frames: 3
