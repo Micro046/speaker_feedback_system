@@ -35,10 +35,13 @@ accelerate
 # ---- NVIDIA ----
 nvidia-nat[langchain]
 
-# ---- PyTorch CUDA 12.1 (MUST pin) ----
+#-----Torch ------
 torch==2.5.1+cu121
 torchvision==0.20.1+cu121
 torchaudio==2.5.1+cu121
 
 # ---- Detectron2 ----
 detectron2 @ git+https://github.com/facebookresearch/detectron2.git
+
+# -----pdf ----------
+reportlab
