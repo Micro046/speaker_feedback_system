@@ -1,0 +1,34 @@
+# speaker_feedback/nemo/configs/recommendations.yml
+
+llms:
+  speaker_llm:
+    _type: openai
+    base_url: https://openrouter.ai/api/v1
+    api_key: $OPENROUTER_API_KEY
+    model_name: nvidia/nemotron-nano-12b-v2-vl:free
+
+workflow:
+  _type: react_agent
+  llm_name: speaker_llm
+  tool_names:
+    - chat_completion
+  parse_agent_response_max_retries: 2
+  additional_instructions: |
+    You are a presentation coach.
+    You must produce recommendations ONLY when you can cite evidence from the provided payload.
+    Evidence must include timestamps and slide_id.
+    If evidence is weak (low coverage/confidence), explicitly say so and avoid strong claims.
+    Do not call any tools for this task.
+    Always follow the ReAct response format. If you do not use tools, respond with exactly:
+    Thought: I now know the final answer
+    Final Answer:
+    <only the recommendation items, and nothing else>
+    Do not include Action or Observation sections.
+    Do not include any text before Thought or after the final recommendation item.
+
+functions:
+
+  # Built-in chat completion tool
+  chat_completion:
+    _type: chat_completion
+    llm_name: speaker_llm
