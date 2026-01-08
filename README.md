@@ -39,7 +39,7 @@ Optional setup helper:
 
 ## Notebook
 Use:
-- `notebooks/speaker_feedback_modalities.ipynb`
+- `notebooks/speaker_feedback.ipynb`
 
 This notebook runs the full pipeline step-by-step and shows keys and previews after each modality.
 It also builds both payloads and includes optional NeMo recommendation calls.
