@@ -1,4 +1,4 @@
-# Speaker Feedback System
+# PRISM (Presentation Insights System for Multimodal and Multilingual Feedback)
 
 Prototype pipeline for presentation feedback with two reports:
 1) Visual Coaching (delivery style)
