@@ -67,7 +67,7 @@ This notebook runs the full pipeline step-by-step and shows keys and previews af
 It builds both payloads and then generates the combined PDF recommendations.
 
 ## Gradio App (Video -> PDF)
-1) Warm up model caches (optional but recommended):
+1) Warm up model caches:
 ```
 uv run python scripts/setup_paperspace.py
 ```
