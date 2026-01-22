@@ -19,11 +19,11 @@ slides:
   # Frame sampling interval (seconds) for SSIM transitions.
   sample_every_sec: 1.0
   # SSIM threshold to detect slide change.
-  ssim_thresh: 0.85
+  ssim_thresh: 0.90
   # Minimum duration in seconds to keep a slide segment.
-  min_segment_sec: 6.0
+  min_segment_sec: 10.0
   # OCR text similarity threshold to merge near-duplicate slides.
-  similarity_threshold: 0.80
+  similarity_threshold: 0.70
   # Minimum OCR word count to accept a slide.
   min_word_count_for_slide: 12
   # Frames per segment to rank for OCR.
