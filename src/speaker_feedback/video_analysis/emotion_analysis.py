@@ -19,7 +19,7 @@ def _force_cleanup():
 @dataclass
 class EmotionConfig:
     # sampling
-    frames_per_slide_max: int = 6
+    frames_per_slide_max: int = 12
     min_face_conf: float = 0.55
 
     # face crop settings
@@ -30,7 +30,7 @@ class EmotionConfig:
     batch_size: int = 32
 
     # slide aggregation
-    min_valid_frames_for_slide: int = 1
+    min_valid_frames_per_slide: int = 2
 
     # stability / cleanup
     max_total_frames: int = 400
@@ -281,7 +281,7 @@ def analyze_emotions(
         valid_faces = len(frames)
         coverage_ratio = (valid_faces / sampled_total) if sampled_total else 0.0
 
-        if valid_faces < cfg.min_valid_frames_for_slide:
+        if valid_faces < cfg.min_valid_frames_per_slide:
             slide_summaries[str(sid)] = {
                 "dominant_emotion": "no_face",
                 "emotion_frequency": 0.0,

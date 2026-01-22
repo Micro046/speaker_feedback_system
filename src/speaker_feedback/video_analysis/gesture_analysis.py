@@ -123,6 +123,7 @@ class Gestures:
                 
                 if not preds or preds[0].keypoints is None or preds[0].keypoints.xy is None:
                     self.frame_pose_ok.append(False)
+                    self.frame_states_per_frame.append([])
                     continue
 
                 kps_all = preds[0].keypoints.xy
@@ -152,6 +153,7 @@ class Gestures:
                 needed = [0, 5, 6, 9, 10] # Min needed for most
                 if any(confs[i] < self.kp_conf for i in needed):
                     self.frame_pose_ok.append(False)
+                    self.frame_states_per_frame.append([])
                     continue
                 
                 self.frame_pose_ok.append(True)
@@ -188,9 +190,16 @@ class Gestures:
                         if lw[1] > lh[1] and rw[1] > rh[1]:
                              states["hands_in_pockets"] += 1
                              
-                # 4. Open Palms (Wrists wide apart + Elbows out)
+                # 4. Open Palms (Wrists wide apart + above hips/near chest)
                 wrist_spread = np.linalg.norm(lw - rw) / shoulder_width
-                if wrist_spread > self.heuristics.open_palms_ratio:
+                if lh is not None and rh is not None and confs[11] > self.kp_conf and confs[12] > self.kp_conf:
+                    hip_y = max(lh[1], rh[1])
+                    wrists_above_hips = lw[1] < hip_y and rw[1] < hip_y
+                else:
+                    shoulder_y = max(ls[1], rs[1])
+                    wrists_above_hips = lw[1] < (shoulder_y + shoulder_width * 0.8) and rw[1] < (shoulder_y + shoulder_width * 0.8)
+
+                if wrist_spread > self.heuristics.open_palms_ratio and wrists_above_hips:
                     states["open_palms"] += 1
                 
                 # Store per-frame state for event generation (handled by caller currently or we can return it)
@@ -205,7 +214,7 @@ class Gestures:
                 if lh is not None and rh is not None and confs[11] > self.kp_conf and confs[12] > self.kp_conf:
                     if lw[1] > lh[1] and rw[1] > rh[1]:
                         frame_states.append("Hands in Pockets")
-                if wrist_spread > self.heuristics.open_palms_ratio:
+                if wrist_spread > self.heuristics.open_palms_ratio and wrists_above_hips:
                     frame_states.append("Open Palms")
                 
                 self.frame_states_per_frame.append(frame_states)
@@ -253,11 +262,11 @@ class GestureConfig:
     def __init__(
         self,
         *,
-        frames_per_slide_max: int = 6,
+        frames_per_slide_max: int = 12,
         resize_w: int = 640,
         max_total_frames: int = 350,
-        min_event_frames: int = 3,
-        min_pose_coverage_ratio: float = 0.35,
+        min_event_frames: int = 4,
+        min_pose_coverage_ratio: float = 0.4,
         top_evidence_frames: int = 3,
     ):
         self.frames_per_slide_max = int(frames_per_slide_max)
@@ -487,11 +496,11 @@ def gestures_analysis_tool(
     gesture_detector,
     idx_to_slide: Optional[Dict[int, Dict[str, Any]]] = None,
     *,
-    frames_per_slide_max: int = 6,
+    frames_per_slide_max: int = 12,
     resize_w: int = 640,
     max_total_frames: int = 350,
-    min_event_frames: int = 3,
-    min_pose_coverage_ratio: float = 0.35,
+    min_event_frames: int = 4,
+    min_pose_coverage_ratio: float = 0.4,
     top_evidence_frames: int = 3,
 ) -> Dict[str, Any]:
     """
@@ -527,11 +536,11 @@ def gesture_analysis_tool(
     gesture_detector,
     idx_to_slide: Optional[Dict[int, Dict[str, Any]]] = None,
     *,
-    frames_per_slide_max: int = 6,
+    frames_per_slide_max: int = 12,
     resize_w: int = 640,
     max_total_frames: int = 350,
-    min_event_frames: int = 3,
-    min_pose_coverage_ratio: float = 0.35,
+    min_event_frames: int = 4,
+    min_pose_coverage_ratio: float = 0.4,
     top_evidence_frames: int = 3,
 ) -> Dict[str, Any]:
     """

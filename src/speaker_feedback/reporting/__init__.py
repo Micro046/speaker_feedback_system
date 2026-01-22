@@ -1,1 +1,1 @@
-"""Reporting utilities for speaker feedback outputs."""
+"""Reporting utilities."""

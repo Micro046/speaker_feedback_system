@@ -3,7 +3,7 @@
 
 shared:
   # Max sampled frames per slide for visual modalities.
-  frames_per_slide_max: 6
+  frames_per_slide_max: 12
   # Minimum face detector confidence to accept a crop.
   min_face_conf: 0.55
   # Crop expansion ratio around detected face for stable analysis.
@@ -51,7 +51,7 @@ clothing:
 
 gaze:
   # Pitch angle indicating looking down (reading).
-  pitch_down_thresh: 14.0
+  pitch_down_thresh: 18.0
   # Yaw angle indicating looking sideways (slides).
   yaw_side_thresh: 18.0
   # Pitch angle indicating center gaze.
@@ -59,19 +59,19 @@ gaze:
   # Yaw angle indicating center gaze.
   yaw_center_thresh: 7.0
   # Camera bias correction (positive shifts reduce false "downward" detection).
-  pitch_offset: 4.0
+  pitch_offset: 0.0
   # Max frames per slide.
-  frames_per_slide_max: 6
+  frames_per_slide_max: 12
   # Minimum face confidence to accept frame.
   min_face_conf: 0.55
   # Minimum gaze confidence to accept frame.
   min_gaze_conf: 0.2
   # Minimum valid frames per slide to report.
-  min_valid_frames_per_slide: 2
+  min_valid_frames_per_slide: 3
   # Minimum valid frame ratio per slide.
   min_coverage_ratio: 0.2
   # Minimum overall valid frame ratio.
-  min_overall_valid_ratio: 0.3
+  min_overall_valid_ratio: 0.4
   # Crop expansion ratio.
   expand_scale: 1.3
   # Minimum face box size in pixels.
@@ -79,15 +79,11 @@ gaze:
 
 emotion:
   # Max frames per slide.
-  frames_per_slide_max: 6
+  frames_per_slide_max: 12
   # Minimum face confidence to accept frame.
   min_face_conf: 0.55
   # Minimum valid frames per slide to report.
   min_valid_frames_per_slide: 2
-  # Minimum valid frame ratio per slide.
-  min_coverage_ratio: 0.2
-  # Minimum overall valid frame ratio.
-  min_overall_valid_ratio: 0.3
   # Crop expansion ratio.
   expand_scale: 1.3
   # Minimum face box size in pixels.
@@ -111,14 +107,14 @@ gesture:
   # Keypoint confidence threshold.
   kp_conf: 0.3
   # Max frames per slide.
-  frames_per_slide_max: 6
+  frames_per_slide_max: 12
   # Resize width for inference.
   resize_w: 640
   # Global max frames processed.
   max_total_frames: 350
   # Min contiguous frames to confirm an event.
-  min_event_frames: 3
+  min_event_frames: 4
   # Minimum pose coverage ratio.
-  min_pose_coverage_ratio: 0.35
+  min_pose_coverage_ratio: 0.4
   # Evidence frames per event.
   top_evidence_frames: 3

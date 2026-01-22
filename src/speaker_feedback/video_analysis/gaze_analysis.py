@@ -3,7 +3,7 @@ from __future__ import annotations
 import gc
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
-from collections import defaultdict, Counter
+from collections import Counter, defaultdict, deque
 
 import cv2
 import numpy as np
@@ -19,12 +19,16 @@ def _cleanup():
 @dataclass
 class GazeHeuristics:
     # Angles in degrees
-    pitch_down_thresh: float = 12.0
+    pitch_down_thresh: float = 18.0
     yaw_side_thresh: float = 18.0
-    pitch_center_thresh: float = 10.0
+    pitch_center_thresh: float = 12.0
     yaw_center_thresh: float = 7.0
     # Positive values reduce downward bias if the camera is above eye level.
     pitch_offset: float = 0.0
+    # Minimum samples to trust automatic pitch baseline.
+    pitch_baseline_min_samples: int = 10
+    # Only use pitch samples within this absolute range for baseline.
+    pitch_baseline_max_abs: float = 30.0
 
 
 class MediaPipeGazeDirection:
@@ -54,6 +58,8 @@ class MediaPipeGazeDirection:
             min_tracking_confidence=min_tracking_confidence,
         )
         self._cfg = heuristics or GazeHeuristics()
+        self._pitch_baseline = None
+        self._pitch_samples = deque(maxlen=30)
 
         # 3D Face Model Points (Generic)
         self.face_3d = np.array(
@@ -115,9 +121,18 @@ class MediaPipeGazeDirection:
         angles, _, _, _, _, _ = cv2.RQDecomp3x3(rmat)
 
         # Angles: x=Pitch, y=Yaw, z=Roll
-        pitch = float(angles[0] * 360)
-        yaw = float(angles[1] * 360)
-        pitch_adj = pitch - float(self._cfg.pitch_offset or 0.0)
+        pitch = self._normalize_angle(float(angles[0]))
+        yaw = self._normalize_angle(float(angles[1]))
+        if (
+            abs(yaw) <= (self._cfg.yaw_center_thresh + 2.0)
+            and abs(pitch) <= float(self._cfg.pitch_baseline_max_abs)
+        ):
+            self._pitch_samples.append(pitch)
+            if len(self._pitch_samples) >= max(self._cfg.pitch_baseline_min_samples, 1):
+                self._pitch_baseline = float(np.median(self._pitch_samples))
+
+        baseline = self._pitch_baseline if self._pitch_baseline is not None else 0.0
+        pitch_adj = pitch - baseline - float(self._cfg.pitch_offset or 0.0)
 
         # Semantic Mapping
         if pitch_adj > self._cfg.pitch_down_thresh:
@@ -135,6 +150,21 @@ class MediaPipeGazeDirection:
             conf = float(max(0.4, min(1.0, conf)))
 
         return label, float(conf)
+
+    @staticmethod
+    def _normalize_angle(angle: float) -> float:
+        """
+        Normalize to [-90, 90] to avoid discontinuities around +/-180.
+        """
+        while angle > 180.0:
+            angle -= 360.0
+        while angle < -180.0:
+            angle += 360.0
+        if angle > 90.0:
+            angle -= 180.0
+        elif angle < -90.0:
+            angle += 180.0
+        return angle
 
     @staticmethod
     def summarize_gaze(labels) -> Dict[str, object]:
@@ -182,16 +212,16 @@ class MediaPipeGazeDirection:
 
 @dataclass
 class GazeConfig:
-    frames_per_slide_max: int = 6
+    frames_per_slide_max: int = 12
     min_face_conf: float = 0.55
     min_gaze_conf: float = 0.2
     expand_scale: float = 1.3
     min_face_size: int = 48
     max_total_frames: int = 300
     top_evidence_frames: int = 3  # store best frames per slide for NAT citations
-    min_valid_frames_per_slide: int = 2
+    min_valid_frames_per_slide: int = 3
     min_coverage_ratio: float = 0.2
-    min_overall_valid_ratio: float = 0.3
+    min_overall_valid_ratio: float = 0.4
 
 
 def _clamp(x1, y1, x2, y2, w, h):
@@ -216,7 +246,7 @@ def pick_frames(slide_frame_mapping, face_crops_cache, cfg: GazeConfig):
     Pick up to N frames per slide.
     Prefer largest face area if available, else fallback to confidence.
     """
-    picked = []
+    picked_by_slide = {}
     for sid, info in slide_frame_mapping.items():
         cands = []
         for idx in info.get("frame_indices", []):
@@ -240,17 +270,42 @@ def pick_frames(slide_frame_mapping, face_crops_cache, cfg: GazeConfig):
 
         # sort by area desc, then conf desc
         cands.sort(reverse=True, key=lambda x: (x[0], x[1]))
+        frames = []
         for _, conf, idx, bbox in cands[: cfg.frames_per_slide_max]:
-            picked.append({
+            frames.append({
                 "slide_id": int(sid),
                 "frame_idx": int(idx),
                 "face_conf": float(conf),
                 "bbox": bbox
             })
+        if frames:
+            picked_by_slide[int(sid)] = frames
+
+    if not picked_by_slide:
+        return []
+
+    slide_ids = sorted(picked_by_slide.keys())
+    total = sum(len(frames) for frames in picked_by_slide.values())
+
+    picked = []
+    if total <= cfg.max_total_frames:
+        for sid in slide_ids:
+            picked.extend(picked_by_slide[sid])
+    else:
+        while len(picked) < cfg.max_total_frames:
+            progressed = False
+            for sid in slide_ids:
+                frames = picked_by_slide.get(sid)
+                if not frames:
+                    continue
+                picked.append(frames.pop(0))
+                progressed = True
+                if len(picked) >= cfg.max_total_frames:
+                    break
+            if not progressed:
+                break
 
     picked.sort(key=lambda x: (x["slide_id"], -x["face_conf"]))
-    if len(picked) > cfg.max_total_frames:
-        picked = picked[: cfg.max_total_frames]
     return picked
 
 
@@ -278,10 +333,15 @@ def analyze_gaze(
 
     # Store per-slide records with confidence and evidence
     slide_records: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    attempted_per_slide: Dict[int, int] = defaultdict(int)
     valid_labels: List[str] = []
     total_samples = 0
 
     for rec in picked:
+        sid = int(rec["slide_id"])
+        attempted_per_slide[sid] += 1
+        total_samples += 1
+
         cap.set(cv2.CAP_PROP_POS_FRAMES, rec["frame_idx"])
         ok, frame = cap.read()
         if not ok or frame is None:
@@ -299,9 +359,6 @@ def analyze_gaze(
             gaze, conf = "no_gaze", 0.0
 
         conf = float(conf) if conf is not None else 0.0
-        sid = int(rec["slide_id"])
-        total_samples += 1
-
         slide_records[sid].append({
             "frame_idx": int(rec["frame_idx"]),
             "t_sec": float(rec["frame_idx"]) / float(fps),
@@ -342,7 +399,7 @@ def analyze_gaze(
     issues: Dict[str, Any] = {}
 
     for sid in sorted(slide_frame_mapping.keys()):
-        sampled = len(slide_frame_mapping[sid].get("frame_indices", []))
+        sampled = attempted_per_slide.get(sid, 0)
         recs = slide_records.get(sid, [])
 
         valid = [r for r in recs if r["gaze"] not in {"no_face", "unknown"} and r["gaze_conf"] >= cfg.min_gaze_conf]

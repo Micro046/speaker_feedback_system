@@ -13,7 +13,7 @@ def emotion_analysis_tool(
     face_crops_cache: Dict[int, Any],
     fer,
     idx_to_slide: Optional[Dict[int, Dict[str, Any]]] = None,
-    frames_per_slide_max: int = 6,
+    frames_per_slide_max: int = 12,
     min_face_conf: float = 0.55,
     min_valid_frames_per_slide: int = 2,
     min_coverage_ratio: float = 0.2,
@@ -25,7 +25,7 @@ def emotion_analysis_tool(
     cfg = EmotionConfig(
         frames_per_slide_max=frames_per_slide_max,
         min_face_conf=min_face_conf,
-        min_valid_frames_for_slide=min_valid_frames_per_slide,
+        min_valid_frames_per_slide=min_valid_frames_per_slide,
         expand_scale=expand_scale,
         min_face_size=min_face_size,
         batch_size=batch_size,
