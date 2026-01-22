@@ -82,3 +82,9 @@ The app prints progress logs and generates a single PDF report.
 - Per-slide report uses only speech + slide content.
 - Visual report uses gaze/emotion/gesture/clothing with reliability gates.
 - Slide crops are stored under `data/inputs/video/slides/<video_name>/`.
+
+## License
+Apache License 2.0 – see LICENSE file.
+
+## Acknowledgements
+This project was developed by Hassan Iftikhar and Ali Arshad under the supervision of Andrey Savchenko.
